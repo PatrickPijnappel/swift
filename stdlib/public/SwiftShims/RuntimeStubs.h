@@ -46,6 +46,11 @@ __swift_uint64_t _swift_stdlib_loadUInt64Unaligned(const void * _Nonnull p) {
   return result;
 }
 
+static inline SWIFT_ALWAYS_INLINE
+void _swift_stdlib_writeUInt64Unaligned(void * _Nonnull p, __swift_uint64_t x) {
+  __builtin_memcpy(p, &x, sizeof x);
+}
+
 SWIFT_END_NULLABILITY_ANNOTATIONS
 
 #ifdef __cplusplus

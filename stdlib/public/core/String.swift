@@ -780,6 +780,25 @@ extension String {
     return x &+ UInt8(truncatingIfNeeded: toAdd)
   }
 
+  /// - Requires: count >= 8.
+  @inline(__always)
+  internal func _chunkwiseTransform(
+    from source: UnsafeBufferPointer<UInt8>,
+    to destination: UnsafeMutableBufferPointer<UInt8>,
+    _ transform: (UInt64) -> UInt64
+  ) {
+    _internalInvariant(source.count >= 8)
+    let p0 = UnsafeRawPointer(source.baseAddress._unsafelyUnwrappedUnchecked)
+    let p1 = UnsafeMutableRawPointer(destination.baseAddress._unsafelyUnwrappedUnchecked)
+    let chunk0 = _swift_stdlib_loadUInt64Unaligned(p0)
+    _swift_stdlib_writeUInt64Unaligned(p1, transform(chunk0))
+    var i = (source.count &- 1) % 8 &+ 1
+    while i < source.count {
+      let chunk = _swift_stdlib_loadUInt64Unaligned(p0 + i)
+      _swift_stdlib_writeUInt64Unaligned(p1 + i, transform(chunk))
+      i &+= 8
+    }
+  }
 
   /// Returns a lowercase version of the string.
   ///
@@ -795,16 +814,28 @@ extension String {
   @_effects(releasenone)
   public func lowercased() -> String {
     if _fastPath(_guts.isFastASCII) {
-      return _guts.withFastUTF8 { utf8 in
-        return String(_uninitializedCapacity: utf8.count) { buffer in
-          for i in 0 ..< utf8.count {
-            buffer[i] = _lowercaseASCII(utf8[i])
+      func lowercaseChunk(_ chunk: UInt64) -> UInt64 {
+        // Per byte `b`, set bit 7 if b >= "A" && b <= "Z".
+        let flags = (_allLanes(0x80 - UInt8(ascii: "A")) &+ chunk)
+          & (_allLanes(0x7f + UInt8(ascii: "Z")) &- chunk)
+        // Use those 7th bits to conditionally flip bit 5, which changes case.
+        return chunk ^ (flags & _allLanes(0x80)) &>> 2
+      }
+      if _guts.isSmall {
+        var (chunk0, chunk1) = _guts.asSmall.rawBits
+        let countAndFlags = chunk1 & UInt64(0xff).bigEndian
+        chunk0 = lowercaseChunk(chunk0)
+        chunk1 = lowercaseChunk(chunk1 ^ countAndFlags) ^ countAndFlags
+        return String(_StringGuts(_SmallString(raw: (chunk0, chunk1))))
+      } else if _fastPath(_guts.count >= 8) {
+        return _guts.withFastUTF8 { utf8 in
+          return String(_uninitializedCapacity: utf8.count) { buffer in
+            _chunkwiseTransform(from: utf8, to: buffer, lowercaseChunk)
+            return utf8.count
           }
-          return utf8.count
         }
       }
     }
-
     // TODO(String performance): Try out incremental case-conversion rather than
     // make UTF-16 array beforehand
     let codeUnits = Array(self.utf16).withUnsafeBufferPointer {
@@ -855,16 +886,28 @@ extension String {
   @_effects(releasenone)
   public func uppercased() -> String {
     if _fastPath(_guts.isFastASCII) {
-      return _guts.withFastUTF8 { utf8 in
-        return String(_uninitializedCapacity: utf8.count) { buffer in
-          for i in 0 ..< utf8.count {
-            buffer[i] = _uppercaseASCII(utf8[i])
+      func uppercaseChunk(_ chunk: UInt64) -> UInt64 {
+        // Per byte `b`, set bit 7 if b >= "a" && b <= "z".
+        let flags = (_allLanes(0x80 - UInt8(ascii: "a")) &+ chunk)
+          & (_allLanes(0x7f + UInt8(ascii: "z")) &- chunk)
+        // Use those 7th bits to conditionally flip bit 5, which changes case.
+        return chunk ^ (flags & _allLanes(0x80)) &>> 2
+      }
+      if _guts.isSmall {
+        var (chunk0, chunk1) = _guts.asSmall.rawBits
+        let countAndFlags = chunk1 & UInt64(0xff).bigEndian
+        chunk0 = uppercaseChunk(chunk0)
+        chunk1 = uppercaseChunk(chunk1 ^ countAndFlags) ^ countAndFlags
+        return String(_StringGuts(_SmallString(raw: (chunk0, chunk1))))
+      } else if _fastPath(_guts.count >= 8) {
+        return _guts.withFastUTF8 { utf8 in
+          return String(_uninitializedCapacity: utf8.count) { buffer in
+            _chunkwiseTransform(from: utf8, to: buffer, uppercaseChunk)
+            return utf8.count
           }
-          return utf8.count
         }
       }
     }
-
     // TODO(String performance): Try out incremental case-conversion rather than
     // make UTF-16 array beforehand
     let codeUnits = Array(self.utf16).withUnsafeBufferPointer {
